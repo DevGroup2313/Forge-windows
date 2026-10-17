@@ -1,0 +1,7 @@
+# Keep the app file byte for byte as committed. Without this, Git on Windows
+# rewrites every line ending, and the built program carries a different file.
+*.html -text
+*.js -text
+*.json -text
+# The installer script is kept as committed.
+*.iss -text

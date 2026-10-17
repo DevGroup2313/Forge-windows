@@ -1,0 +1,560 @@
+# THE FORGE  |  Copyright (c) 2026 Yannie D. Forest. All rights reserved.
+# NO LICENCE IS GRANTED. See LICENCE.txt.
+#
+# Builds The Forge for Windows on GitHub's own Windows computer, so nothing
+# has to be installed or built on your PC. It runs by itself whenever something
+# is uploaded to the repository, and by hand from the Actions tab ("Build
+# The Forge for Windows", "Run workflow").
+#
+# 9s58: made the way Inkwell 7.36 is made: PyInstaller with its STANDARD
+# starter from the pip wheel (the one inside Inkwell), a program folder
+# (windowed, one folder) with Inkwell's quiet console hook, and a per-user Inno
+# Setup installer. The same tool versions as Inkwell's last good build.
+#
+# What it does, in order:
+#   1. builds the program as a program FOLDER (not one self-unpacking file),
+#      with PyInstaller's standard starter and with version details;
+#   2. checks the app inside is the one uploaded, opens the program once,
+#      and measures how long its window and page take to be ready (the
+#      release notes give the times);
+#   3. makes a normal installer (Inno Setup, the same design as Inkwell's),
+#      then installs and uninstalls it silently to prove both work, also
+#      over the open program and while it is open;
+#   4. scans the installer, the program folder and the project with
+#      Microsoft Defender, after fetching the newest definitions. It only
+#      scans: it changes none of Defender's settings, and it reports what it
+#      finds instead of deleting it. A detection stops the run and NOTHING is
+#      published;
+#   5. publishes ONLY the installer on the Releases page, with the Defender
+#      result, the measured start and its SHA-256, under a title that names
+#      the version and the build. The program folder must stay together, so it
+#      is never published loose; a zip of it is kept with the run ("Artifacts").
+
+name: Build The Forge for Windows
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Keep every file exactly as committed
+        # GitHub's Windows computer would otherwise rewrite the app file's line
+        # endings while fetching it, and the program would carry a different
+        # file. .gitattributes says the same, but a hidden file is easily left
+        # behind when uploading from a Mac, so this does not depend on it.
+        run: git config --global core.autocrlf false
+
+      - name: Get the project
+        uses: actions/checkout@v4
+
+      - name: Find the project folder and the build number
+        run: |
+          $f = Get-ChildItem -Recurse -Filter the_forge.spec | Where-Object { $_.FullName -notmatch '\\.git\\' } | Select-Object -First 1
+          if (-not $f) { Write-Error "the_forge.spec not found. Upload the CONTENTS of the Windows project folder."; exit 1 }
+          $proj = $f.DirectoryName
+          if (-not (Test-Path (Join-Path $proj 'the_forge.iss'))) { Write-Error "the_forge.iss is missing beside the_forge.spec. Upload the CONTENTS of the Windows project folder again."; exit 1 }
+          $info = @{}
+          Get-Content (Join-Path $proj 'BUILD_INFO.txt') | ForEach-Object { if ($_ -match '^\s*([^:]+):\s*(.*)$') { $info[$Matches[1].Trim().ToLower()] = $Matches[2].Trim() } }
+          $pass = "$($info['pass'])" -replace '[^0-9]', ''
+          if (-not $pass) { $pass = '0' }
+          $stamp = "$($info['stamp'])"
+          if (-not $stamp) { $stamp = $pass }
+          # Windows allows at most 65535 in each part of a version number, so
+          # each part is clamped, the same way the_forge.spec clamps it
+          # (a build number made from a date, such as 20261007, becomes 65535).
+          function Part([string]$n) { if (-not $n) { return 0 }; return [math]::Min([int64]$n, 65535) }
+          $p = Part $pass
+          if ($stamp -match '^(\d{1,9})s(\d{1,9})$') { $numeric = "$(Part $Matches[1]).$(Part $Matches[2]).$p.0" } else { $numeric = "1.0.$p.0" }
+          $setupBase = [IO.Path]::GetFileNameWithoutExtension('The-Forge-Windows.zip') + '-Setup'
+          $folderZip = [IO.Path]::GetFileNameWithoutExtension('The-Forge-Windows.zip') + '-Program-Folder.zip'
+          @(
+            "PROJ=$proj"
+            "APP_PASS=$pass"
+            "APP_STAMP=$stamp"
+            "APP_NUMERIC=$numeric"
+            "SETUP_BASE=$setupBase"
+            "FOLDER_ZIP=$folderZip"
+            "OUT=$env:RUNNER_TEMP\out"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\out" | Out-Null
+          "Project folder: $proj"
+          "Build $pass ($stamp), version $numeric, installer $setupBase.exe"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the build tools
+        # The versions of Inkwell 7.36's last good Windows build (its run 24,
+        # 7 October 2026), which Ingenium also pins. Fixed, so a new release
+        # elsewhere cannot change the program without anyone noticing.
+        # PyInstaller comes as its ready-made wheel (--only-binary), so the
+        # program gets PyInstaller's standard starter, as Inkwell's does.
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet --only-binary=pyinstaller "pyinstaller==6.22.3" "pywebview==6.2.1" "pythonnet==3.2.0"
+          if ($LASTEXITCODE -ne 0) { Write-Error "The build tools could not be installed."; exit 1 }
+          python -m pip list | Select-String -Pattern "pyinstaller|pywebview|pythonnet"
+          $stock = python -c "import PyInstaller,os,hashlib; p=os.path.join(os.path.dirname(PyInstaller.__file__),'bootloader','Windows-64bit-intel','runw.exe'); print(hashlib.sha256(open(p,'rb').read()).hexdigest())"
+          "Standard starter (runw.exe) SHA-256: $stock"
+          "STOCK_BOOTLOADER=$stock" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          exit 0
+
+      - name: Build The Forge (a program folder)
+        run: |
+          Set-Location $env:PROJ
+          python -m PyInstaller --noconfirm --clean the_forge.spec 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\build-log.txt" | Select-Object -Last 8
+          $dir = "$env:PROJ\dist\The Forge"
+          $exe = "$dir\The Forge.exe"
+          if (-not (Test-Path $exe)) { Write-Error "No program was produced."; exit 1 }
+          # The starter PyInstaller used, in its own words ("Bootloader ...").
+          $boot = Select-String -LiteralPath "$env:RUNNER_TEMP\build-log.txt" -Pattern 'Bootloader\s+(\S.*runw\.exe)' | Select-Object -First 1
+          if ($boot -and $boot.Line -match 'PyInstaller\\bootloader\\Windows-64bit-intel\\runw\.exe') {
+            "Starter: $($boot.Matches[0].Groups[1].Value)"
+            "BOOTLOADER=PyInstaller's standard one from the pip wheel, as Inkwell's (runw.exe SHA-256 $env:STOCK_BOOTLOADER)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            "::warning::The build log does not name PyInstaller's standard starter. The release notes say so."
+            "BOOTLOADER=not confirmed from the build log (expected PyInstaller's standard one, runw.exe SHA-256 $env:STOCK_BOOTLOADER)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          $v = (Get-Item $exe).VersionInfo
+          "Version details: product '$($v.ProductName)', description '$($v.FileDescription)', file version $($v.FileVersion), product version '$($v.ProductVersion)', company '$($v.CompanyName)'"
+          if (-not $v.ProductName -or -not $v.CompanyName) { Write-Error "The program carries no version details."; exit 1 }
+          $files = Get-ChildItem $dir -Recurse -File
+          "{0} files, {1:N1} MB; the program itself {2:N1} MB" -f $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB), ((Get-Item $exe).Length / 1MB)
+          "PROGRAM_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          exit 0
+
+      - name: Check the app file inside is the one committed
+        run: |
+          python -c "import sys,hashlib; a=open(sys.argv[1],'rb').read(); b=open(sys.argv[2],'rb').read(); print('inside', hashlib.sha256(a).hexdigest(), 'committed', hashlib.sha256(b).hexdigest(), 'CRLF inside', a.count(b'\r\n')); sys.exit(0 if a==b and a.count(b'\r\n')==0 else 1)" "$env:PROGRAM_DIR\_internal\the_forge.html" "$env:PROJ\the_forge.html"
+          if ($LASTEXITCODE -ne 0) { Write-Error "The app inside the program is not the file the_forge.html that was uploaded."; exit 1 }
+          exit 0
+
+      - name: Open the program once
+        # Starts the finished program and reads its own log. Instead of a fixed
+        # wait, it waits for the program's own line "start: page ready in N s"
+        # (at most 120 seconds), then takes a photograph, starts the program a
+        # second time (that copy must bring the open window forward and end:
+        # one copy at a time), closes it the way a person does and checks the
+        # ending was clean. The times go to the run's summary and the release
+        # notes. Only a page that never says it is ready stops the build.
+        run: |
+          Set-Location $env:PROGRAM_DIR
+          # 9s58: the program keeps its log beside the work, as Inkwell does.
+          $log = "$env:LOCALAPPDATA\TheForge\the_forge_crash.log"
+          Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
+          # The app's own record of a run that did not end cleanly. After one,
+          # the next start uses safe graphics on that PC.
+          $flag = "$env:LOCALAPPDATA\TheForge\storage\the_forge_session.flag"
+          Remove-Item -LiteralPath $flag -ErrorAction SilentlyContinue
+          # The log is read while the program may still be writing to it.
+          function ReadLog {
+            try {
+              $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
+              try { (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() }
+            } catch { '' }
+          }
+          function Secs([string]$text, [string]$pattern) {
+            $m = [regex]::Match($text, $pattern)
+            if ($m.Success) { return [double]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) }
+            return $null
+          }
+          function Shown($s) { if ($null -eq $s) { 'not recorded' } else { [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0} s', $s) } }
+          $before = @(Get-ChildItem -Force -Name)
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          $p = Start-Process -FilePath ".\The Forge.exe" -PassThru
+          $null = $p.Handle   # without this, PowerShell may lose the exit code
+          $text = ''
+          while (($clock.Elapsed.TotalSeconds -lt 120) -and -not $p.HasExited) {
+            Start-Sleep -Milliseconds 500
+            $text = ReadLog
+            if ($text -match 'start: page (NOT )?ready') { break }
+          }
+          $waited = Shown $clock.Elapsed.TotalSeconds
+          $readyIn = Secs $text 'start: page ready in ([0-9.]+) s'
+          if ($null -ne $readyIn) { "The page said it was ready $(Shown $readyIn) after the program started ($waited after it was launched here)." } else { "No ready line from the program after $waited." }
+          # A moment for the first view to settle, then the photograph.
+          if (-not $p.HasExited) { Start-Sleep -Seconds 3 }
+          try {
+            New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\shots" | Out-Null
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save("$env:RUNNER_TEMP\shots\windows.png")
+            "Screenshot taken."
+          } catch { "No screenshot: $($_.Exception.Message)" }
+          # One copy at a time: a second start must bring the open window
+          # forward and end by itself, without touching the session mark.
+          $second = 'not tried, because the program was not running'
+          if (-not $p.HasExited) {
+            $q = Start-Process -FilePath ".\The Forge.exe" -PassThru
+            $null = $q.Handle
+            # It counts only when that copy ended by itself, with exit code 0,
+            # and wrote that it brought the open window forward. Anything else
+            # is a warning, not a stop.
+            $ended = $q.WaitForExit(30000)
+            $fwd = (ReadLog) -match 'start: already open; brought its window forward'
+            if ($ended -and $q.ExitCode -eq 0 -and $fwd) { $second = 'it brought the open window forward and ended by itself (exit code 0)' } else {
+              $second = if ($ended) { "it ended with code $($q.ExitCode) without saying it brought the window forward" } else { 'it did NOT end by itself within 30 seconds' }
+              if (-not $ended) { $q.Refresh(); if (-not ($q.CloseMainWindow() -and $q.WaitForExit(20000))) { Stop-Process -Id $q.Id -Force -ErrorAction SilentlyContinue; $null = $q.WaitForExit(10000) } }
+              "::warning::A second start did not behave as one copy at a time should: $second. The log below says more."
+            }
+            "Second start: $second."
+          }
+          $alive = -not $p.HasExited
+          # Closed the way a person closes it (the close message that its X and
+          # Alt+F4 send), not killed: a kill counts as a bad ending.
+          $clean = $false
+          if ($alive) {
+            "Still running after $(Shown $clock.Elapsed.TotalSeconds)."
+            $p.Refresh()
+            if ($p.CloseMainWindow() -and $p.WaitForExit(20000)) { "Closed when asked." } else { "Did NOT close when asked, so it was stopped."; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Seconds 2
+            if (Test-Path -LiteralPath $flag) { "The close left the mark of a bad ending ($(Get-Content -LiteralPath $flag))." } else { $clean = $true; "The close was a clean ending." }
+          } else { "EXITED EARLY with code $($p.ExitCode)" }
+          # Closed, then opened again at once, as a person might: the new copy
+          # must open its own window again. For now a warning with the log, so
+          # the cause can be read; not a stop.
+          $reopen = 'not tried, because the first close was not clean'
+          $failed = 'import webview failed|create_window failed|webview\.start failed|every backend refused'
+          if ($clean) {
+            $n0 = ([regex]::Matches((ReadLog), 'start: page (NOT )?ready')).Count
+            $r = Start-Process -FilePath ".\The Forge.exe" -PassThru
+            $null = $r.Handle
+            $c2 = [Diagnostics.Stopwatch]::StartNew()
+            $t2 = ''
+            while (($c2.Elapsed.TotalSeconds -lt 120) -and -not $r.HasExited) {
+              Start-Sleep -Milliseconds 500
+              $t2 = ReadLog
+              if (([regex]::Matches($t2, 'start: page (NOT )?ready')).Count -gt $n0) { break }
+              if ($t2 -match $failed) { break }
+            }
+            $fell = $t2 -match $failed
+            if ($fell) { $reopen = 'it could NOT open its own window (see the log below)' }
+            elseif (([regex]::Matches($t2, 'start: page (NOT )?ready')).Count -gt $n0) { $reopen = "it opened its own window again ($(Shown $c2.Elapsed.TotalSeconds) here)" }
+            else { $reopen = 'it gave no ready line within 120 seconds' }
+            if (-not $r.HasExited) {
+              $r.Refresh()
+              if (-not ($r.CloseMainWindow() -and $r.WaitForExit(20000))) { Stop-Process -Id $r.Id -Force -ErrorAction SilentlyContinue; $null = $r.WaitForExit(10000) }
+            }
+            Start-Sleep -Seconds 2
+            Remove-Item -LiteralPath $flag -ErrorAction SilentlyContinue
+            if ($reopen -notlike 'it opened its own window again*') { "::warning::Opening again at once after a close: $reopen." }
+            "Opened again at once after the close: $reopen."
+          }
+          "--- what the app recorded ---"
+          $text = ReadLog
+          if ($text) { $text } else { "(nothing)" }
+          # The program's own times, in seconds from its own start.
+          $shown = Secs $text 'start: window shown after ([0-9.]+) s'
+          $loaded = Secs $text 'start: the page has loaded after ([0-9.]+) s'
+          $readyIn = Secs $text 'start: page ready in ([0-9.]+) s'
+          $note = "window shown after $(Shown $shown), page loaded after $(Shown $loaded), page ready after $(Shown $readyIn)"
+          Add-Content $env:GITHUB_STEP_SUMMARY "### Start on GitHub's Windows computer: $note"
+          Add-Content $env:GITHUB_STEP_SUMMARY "Seconds from the program's own start, on a first start (a new web view profile) on a computer with no graphics chip, so a PC is usually quicker. Second start: $second. Opened again at once after a close: $reopen."
+          "START_NOTE=$note" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($text -match 'Traceback') { Write-Error "A fault was recorded."; exit 1 }
+          if (-not $alive) { exit 1 }
+          if (-not $clean) { Write-Error "Closing the window did not end the app cleanly. After such an ending the app switches safe graphics on for that PC."; exit 1 }
+          if ($null -eq $readyIn) { Write-Error "The page did not say it was ready within 120 seconds of the program's start. The photograph under Artifacts shows what was on the screen."; exit 1 }
+          Start-Sleep -Seconds 2
+          foreach ($n in @(Get-ChildItem -Force -Name)) { if ($before -notcontains $n) { "Left by the run, removed so it is not packed: $n"; Remove-Item $n -Recurse -Force -ErrorAction SilentlyContinue } }
+          exit 0
+
+      - name: Keep the screenshot with this run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-screenshot
+          path: ${{ runner.temp }}/shots
+          if-no-files-found: warn
+
+      - name: Make the installer
+        run: |
+          $find = { Get-ChildItem -Path "${env:ProgramFiles(x86)}\Inno Setup*\ISCC.exe", "$env:ProgramFiles\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          $iscc = & $find
+          if (-not $iscc) { choco install innosetup -y --no-progress | Out-Null; $iscc = & $find }
+          if (-not $iscc) { Write-Error "Inno Setup could not be found or installed."; exit 1 }
+          "Inno Setup: $($iscc.FullName) $($iscc.VersionInfo.ProductVersion)"
+          & $iscc.FullName /Qp "/DAppVersion=$env:APP_STAMP" "/DAppNumeric=$env:APP_NUMERIC" "/DProgramDir=$env:PROGRAM_DIR" "/DOutputDir=$env:OUT" "/DSetupName=$env:SETUP_BASE" "$env:PROJ\the_forge.iss"
+          if ($LASTEXITCODE -ne 0) { Write-Error "The installer could not be made."; exit 1 }
+          $setup = "$env:OUT\$env:SETUP_BASE.exe"
+          if (-not (Test-Path $setup)) { Write-Error "No installer was produced."; exit 1 }
+          Get-Item $setup | Format-List Name, Length
+          exit 0
+
+      - name: Install it, then uninstall it, silently
+        run: |
+          $setup = "$env:OUT\$env:SETUP_BASE.exe"
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\The Forge'
+          # Four older backups of the work, so the test sees the installer keep
+          # only the three newest copies (its own new one among them).
+          $bk = Join-Path $env:LOCALAPPDATA 'TheForge\backups'
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:LOCALAPPDATA 'TheForge\storage') | Out-Null
+          foreach ($d in 'setup-20000101-000000', 'setup-20000102-000000', 'setup-20000103-000000', 'setup-20000104-000000') { New-Item -ItemType Directory -Force -Path "$bk\$d\storage" | Out-Null }
+          $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/LOG=$env:RUNNER_TEMP\setup-log.txt" -PassThru
+          $null = $p.Handle   # without this, PowerShell may lose the exit code
+          if (-not $p.WaitForExit(600000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Write-Error "The installer did not finish within 10 minutes."; exit 1 }
+          "Installer exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { Write-Error "The installer failed."; exit 1 }
+          if (-not (Test-Path "$dir\The Forge.exe")) { Write-Error "The installer did not put the program in $dir."; exit 1 }
+          if (-not (Test-Path "$dir\_internal\the_forge.html")) { Write-Error "The installed program has no the_forge.html."; exit 1 }
+          $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'The Forge.lnk'
+          if (-not (Test-Path $lnk)) { Write-Error "No Start menu entry was made."; exit 1 }
+          $key = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like 'com.yannieforest.theforge.windows*' }
+          if (-not $key) { Write-Error "No entry in Settings, Apps."; exit 1 }
+          "Installed in $dir, with a Start menu entry and an entry in Settings, Apps."
+          $kept = @(Get-ChildItem $bk -Directory -Filter 'setup-*' | Sort-Object Name | ForEach-Object Name)
+          "Backups of the work kept by the installer: $($kept -join ', ')"
+          if ($kept.Count -ne 3 -or $kept -contains 'setup-20000101-000000' -or $kept -contains 'setup-20000102-000000' -or $kept[-1] -like 'setup-2000*') { Write-Error "The installer did not keep exactly the three newest backups."; exit 1 }
+          Remove-Item $bk -Recurse -Force -ErrorAction SilentlyContinue
+          # 9s57: an update, and an uninstall, while the program is OPEN. The
+          # installed program is opened and left open; the installer runs
+          # again over it (it must finish with exit code 0, and the update
+          # must start clean: no session flag). Then the program is opened
+          # again and the uninstaller runs while it is open: it must close the
+          # program first ("closed before its files were removed" in its log),
+          # remove it, and the program, closed that way, must leave no session
+          # flag (the mark of a bad ending).
+          # 9s58: the program keeps its log beside the work, as Inkwell does.
+          $log = "$env:LOCALAPPDATA\TheForge\the_forge_crash.log"
+          $flag = "$env:LOCALAPPDATA\TheForge\storage\the_forge_session.flag"
+          function ReadText([string]$path) {
+            try {
+              $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+              try { (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() }
+            } catch { '' }
+          }
+          function ReadyCount { [regex]::Matches((ReadText $log), 'start: page (NOT )?ready').Count }
+          # Opens the installed program and waits (at most 120 seconds) for a
+          # NEW "page ready" line in its log; the log is kept between runs.
+          function OpenInstalled {
+            $seen = ReadyCount
+            $a = Start-Process -FilePath "$dir\The Forge.exe" -WorkingDirectory $dir -PassThru
+            $null = $a.Handle   # without this, PowerShell may lose the exit code
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            while (($clock.Elapsed.TotalSeconds -lt 120) -and -not $a.HasExited -and ((ReadyCount) -le $seen)) { Start-Sleep -Milliseconds 500 }
+            return $a
+          }
+          $a = OpenInstalled
+          if ($a.HasExited) { ReadText $log; Write-Error "The installed program ended by itself (exit code $($a.ExitCode)) instead of staying open."; exit 1 }
+          "The installed program is open (pid $($a.Id))."
+          $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/LOG=$env:RUNNER_TEMP\setup-again-log.txt" -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(600000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Write-Error "The installer, run over the open program, did not finish within 10 minutes."; exit 1 }
+          "Installer, run again over the open program: exit code $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { Write-Error "The installer failed when the program was open."; exit 1 }
+          if (-not (Test-Path "$dir\The Forge.exe")) { Write-Error "After installing over the open program, the program is not in $dir."; exit 1 }
+          if ($a.WaitForExit(20000)) { "The installer closed the open program (exit code $($a.ExitCode))." } else {
+            "::warning::The installer finished but the program it was installed over is still open. It is closed now, so the uninstall test starts from one fresh copy."
+            $a.Refresh()
+            if (-not ($a.CloseMainWindow() -and $a.WaitForExit(20000))) { Stop-Process -Id $a.Id -Force -ErrorAction SilentlyContinue; $null = $a.WaitForExit(10000) }
+          }
+          if (Test-Path -LiteralPath $flag) { Write-Error "After installing over the open program, the session flag is still there ($(Get-Content -LiteralPath $flag)): the update did not start clean."; exit 1 }
+          "The update started clean: no session flag."
+          Remove-Item $bk -Recurse -Force -ErrorAction SilentlyContinue
+          $b = OpenInstalled
+          if ($b.HasExited) { ReadText $log; Write-Error "The updated program ended by itself (exit code $($b.ExitCode)) instead of staying open."; exit 1 }
+          "The updated program is open (pid $($b.Id)); uninstalling it now."
+          $ulog = "$env:RUNNER_TEMP\uninstall-log.txt"
+          $un = Get-ChildItem $dir -Filter 'unins*.exe' | Select-Object -First 1
+          $u = Start-Process -FilePath $un.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$ulog" -PassThru
+          $null = $u.WaitForExit(300000)
+          # The uninstaller runs on from a copy of itself in TEMP, so the
+          # program and the log are watched rather than the process.
+          for ($i = 0; ($i -lt 90) -and (Test-Path "$dir\The Forge.exe"); $i++) { Start-Sleep -Seconds 1 }
+          $said = ''
+          for ($i = 0; $i -lt 30; $i++) { $said = ReadText $ulog; if ($said -match 'closed before its files were removed|still open after 15 seconds') { break }; Start-Sleep -Seconds 1 }
+          $ended = $b.WaitForExit(20000)
+          "The open program ended during the uninstall: $ended"
+          if (-not $ended) { Stop-Process -Id $b.Id -Force -ErrorAction SilentlyContinue; $null = $b.WaitForExit(10000) }
+          if (Test-Path "$dir\The Forge.exe") { "--- the uninstaller's log ---"; $said; Write-Error "The uninstaller did not remove the program."; exit 1 }
+          if ($said -notmatch 'closed before its files were removed') { "--- the uninstaller's log ---"; $said; Write-Error "The uninstaller did not say that it closed the open program before removing its files."; exit 1 }
+          "The uninstaller closed the open program before removing its files."
+          if (Test-Path -LiteralPath $flag) { Write-Error "The program closed by the uninstaller left the mark of a bad ending ($(Get-Content -LiteralPath $flag))."; exit 1 }
+          "Closed by the uninstaller, the program ended cleanly: no session flag."
+          "Uninstalled: program removed; folder left behind: $(Test-Path $dir); Start menu entry left behind: $(Test-Path $lnk)"
+          exit 0
+
+      - name: If the build failed, show why
+        if: failure()
+        run: |
+          foreach ($l in @("$env:RUNNER_TEMP\build-log.txt", "$env:RUNNER_TEMP\setup-log.txt", "$env:RUNNER_TEMP\setup-again-log.txt", "$env:RUNNER_TEMP\uninstall-log.txt")) { if (Test-Path $l) { "--- $l"; Get-Content $l -Tail 80 } }
+
+      - name: Zip the program folder and the project (kept with the run, not published)
+        # Both zips are scanned by Defender in the next step: the program folder
+        # as a zip would carry it, and the project as the package zip made by
+        # The Forge carries it.
+        run: |
+          function Zip([string]$from, [string]$to) {
+            Remove-Item $to -ErrorAction SilentlyContinue
+            $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue
+            if ($sevenZip) { & $sevenZip.Source a -tzip -mx=7 $to $from | Out-Null }
+            if (-not (Test-Path $to)) { Compress-Archive -Path $from -DestinationPath $to -Force }
+            Get-Item $to | Format-List Name, Length
+          }
+          Zip $env:PROGRAM_DIR "$env:OUT\$env:FOLDER_ZIP"
+          $copy = Join-Path $env:RUNNER_TEMP 'project-copy\Windows project'
+          New-Item -ItemType Directory -Force -Path $copy | Out-Null
+          Get-ChildItem -Force $env:PROJ | Where-Object { $_.Name -notin @('.git', 'dist', 'build', '__pycache__') } | Copy-Item -Destination $copy -Recurse -Force
+          Zip $copy "$env:OUT\project-as-packaged.zip"
+          exit 0
+
+      - name: Scan with Microsoft Defender (a detection stops the run)
+        # A scan only, as anyone can run one on their own PC. It fetches the
+        # newest definitions, then scans the installer, both zips, the program
+        # folder and the project with MpCmdRun -Scan -DisableRemediation, which
+        # reports what it finds instead of deleting it, looks inside zips, and
+        # ignores the folders GitHub's computer excludes from scanning
+        # (Microsoft, "MpCmdRun command-line arguments": "File exclusions are
+        # ignored. Archive files are scanned. Actions aren't applied after
+        # detection."). None of Defender's settings is changed.
+        # What it cannot see: GitHub's computers keep Defender's cloud
+        # protection and real-time protection off (GitHub's runner-images
+        # setup), so this scan uses the definitions alone. A home PC also asks
+        # Microsoft's cloud, may send it a copy of a new program for a closer
+        # look, and SmartScreen judges by reputation. So a clean scan is good
+        # evidence, not a guarantee.
+        run: |
+          $report = "$env:OUT\defender-report.txt"
+          function Say([string]$t) { Write-Host $t; Add-Content -Path $report -Value $t -Encoding utf8 }
+          function Threats($text) { @([regex]::Matches("$text", '(?m)^\s*Threat\s*:\s*(.+?)\s*$') | ForEach-Object { $_.Groups[1].Value }) }
+          Say "Microsoft Defender scan, $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm')) UTC, build $env:APP_PASS ($env:APP_STAMP)"
+          Say "Starter: $env:BOOTLOADER"
+          Say "A scan only: none of Defender's settings was changed."
+          $measured = $true; $why = ''; $found = @(); $defs = ''
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          $newer = Get-ChildItem "$env:ProgramData\Microsoft\Windows Defender\Platform\*\MpCmdRun.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($newer) { $mp = $newer.FullName }
+          if (-not (Test-Path $mp)) { $measured = $false; $why = 'MpCmdRun.exe is not on this computer' }
+
+          function Status([string]$when) {
+            try {
+              $s = Get-MpComputerStatus
+              Say ("{0}: mode {1}; engine {2}; definitions {3} of {4}; real-time {5}" -f $when, $s.AMRunningMode, $s.AMEngineVersion, $s.AntivirusSignatureVersion, $s.AntivirusSignatureLastUpdated, $s.RealTimeProtectionEnabled)
+              return $s
+            } catch { Say "${when}: Defender status unavailable ($($_.Exception.Message))"; return $null }
+          }
+          function Scan([string]$path) {
+            $out = & $mp -Scan -ScanType 3 -File $path -DisableRemediation 2>&1 | Out-String
+            [pscustomobject]@{ Path = $path; Code = $LASTEXITCODE; Names = (Threats $out); Output = $out.Trim() }
+          }
+
+          if ($measured) {
+            $null = Status 'Before'
+            & $mp -SignatureUpdate | Out-Host
+            if ($LASTEXITCODE -ne 0) { & $mp -SignatureUpdate -MMPC | Out-Host }
+            $s = Status 'Definitions'
+            if ($s) { $defs = "$($s.AntivirusSignatureVersion)" }
+            # The installer and both zips, the program folder, the project.
+            foreach ($t in @($env:OUT, $env:PROGRAM_DIR, $env:PROJ)) {
+              $r2 = Scan $t
+              if ($r2.Code -eq 0) { Say "Scanned $t : no threats" }
+              elseif ($r2.Code -eq 2 -or $r2.Names.Count -gt 0) { $found += "$t : $($r2.Names -join ', ')"; Say "Scanned $t : THREATS FOUND"; Say $r2.Output }
+              else { Say "Scanned $t : the scan did not finish (exit code $($r2.Code))"; Say $r2.Output; $measured = $false; $why = "a scan did not finish (exit code $($r2.Code))" }
+            }
+          }
+
+          if ($found.Count -gt 0) {
+            Say "RESULT: Microsoft Defender named a threat. Nothing is published."
+            $found | ForEach-Object { Say "  $_" }
+            Add-Content $env:GITHUB_STEP_SUMMARY "### Microsoft Defender: DETECTION, nothing published"
+            $found | ForEach-Object { Add-Content $env:GITHUB_STEP_SUMMARY "* $_" }
+            exit 1
+          }
+          if ($measured) {
+            if (-not $defs) { $defs = 'version unknown' }
+            $note = "no detection (a scan only, with definitions $defs; Defender's settings were not changed, so no cloud lookups)"
+          } else {
+            $note = "NOT MEASURED: $why"
+            "::warning::Microsoft Defender could not be used on GitHub's computer: $why"
+          }
+          Say "RESULT: $note"
+          "DEFENDER_NOTE=$note" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Add-Content $env:GITHUB_STEP_SUMMARY "### Microsoft Defender: $note"
+          Add-Content $env:GITHUB_STEP_SUMMARY "Starter: $env:BOOTLOADER"
+          exit 0
+
+      - name: Keep the installer, the zips and the Defender report with this run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: the-forge-windows
+          path: |
+            ${{ runner.temp }}/out/*.exe
+            ${{ runner.temp }}/out/*.zip
+            ${{ runner.temp }}/out/defender-report.txt
+          if-no-files-found: warn
+
+      - name: Put the installer on the Releases page
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $tag = "the-forge-windows"
+          $setupName = "$env:SETUP_BASE.exe"
+          $setup = "$env:OUT\$setupName"
+          $hs = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+          $when = (Get-Date).ToUniversalTime().ToString('dd MMMM yyyy, HH:mm')
+          # The measured start, from "Open the program once".
+          $startNote = if ($env:START_NOTE) { $env:START_NOTE } else { 'not measured' }
+          # The title names the version and the build, as Inkwell's releases
+          # do; the tag and the file name stay the same, so the link never changes.
+          $title = "The Forge $env:APP_STAMP for Windows (build $env:APP_PASS)"
+          $notes = @(
+            "The Forge for Windows, build $env:APP_PASS ($env:APP_STAMP). Built $when UTC from branch $env:GITHUB_REF_NAME, commit $($env:GITHUB_SHA.Substring(0,7))."
+            ""
+            "Download $setupName and open it. It installs The Forge as a program of its own, for you only (no administrator password), and puts it in the Start menu; it opens in its own window. Python is not needed. To remove it: Settings, Apps, Installed apps, The Forge, Uninstall. Your work stays."
+            ""
+            "If Microsoft Edge warns that the file is not commonly downloaded, do not choose Delete: point at the download, click the three dots, then Keep, Show More and Keep anyway. If Windows then shows ""Windows protected your PC"", click the small link under the message, then Run anyway. Both are about reputation: this exact file is new and not signed with a paid certificate. If Windows Security removes the file or names a threat, note the name under Windows Security, Virus & threat protection, Protection history; READ ME FIRST.txt says what to do."
+            ""
+            "Microsoft Defender on GitHub's Windows computer: $env:DEFENDER_NOTE."
+            "Starter: $env:BOOTLOADER."
+            "Start on GitHub's Windows computer (a first start, no graphics chip; a PC is usually quicker): $startNote."
+            ""
+            "The-Forge-Windows.zip, the old single-file program, is no longer published: the program is now a folder that this installer puts in place."
+            ""
+            "SHA-256 of $setupName (to check a download, or to report a false alarm to Microsoft):"
+            "  $hs"
+          )
+          $notes -join "`n" | Out-File -FilePath "$env:RUNNER_TEMP\notes.txt" -Encoding utf8
+          # GitHub's upload server sometimes answers with an error of its own
+          # (HTTP 500), and a later try goes through. Four tries, further apart.
+          function Retry([scriptblock]$do) {
+            foreach ($wait in 0, 15, 30, 60) {
+              if ($wait -gt 0) { Write-Host "GitHub did not accept it; trying again in $wait seconds."; Start-Sleep -Seconds $wait }
+              & $do | Out-Host
+              if ($LASTEXITCODE -eq 0) { return $true }
+            }
+            return $false
+          }
+          $publish = {
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -eq 0) { gh release upload $tag $setup --clobber }
+            else { gh release create $tag $setup --target $env:GITHUB_SHA --title $title --notes-file "$env:RUNNER_TEMP\notes.txt" }
+          }
+          if (-not (Retry $publish)) { Write-Error "GitHub did not accept the installer after four tries. Run the workflow again later. If an error above says 403 or 'Resource not accessible', the cure is Settings, Actions, General, Workflow permissions: Read and write."; exit 1 }
+          if (-not (Retry { gh release edit $tag --title $title --notes-file "$env:RUNNER_TEMP\notes.txt" })) { Write-Host "The release title and notes could not be updated; the installer is in place." }
+          # The old single-file zip is taken off the release, so nobody
+          # downloads it by mistake; only the installer is published now.
+          $assets = @(gh release view $tag --json assets -q '.assets[].name')
+          if ($assets -contains 'The-Forge-Windows.zip') { gh release delete-asset $tag 'The-Forge-Windows.zip' -y; "Removed the old The-Forge-Windows.zip from the release." }
+          "### Published $setupName as ""$title""" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag" | Add-Content $env:GITHUB_STEP_SUMMARY
+          exit 0

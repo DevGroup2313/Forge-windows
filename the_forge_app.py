@@ -1471,6 +1471,40 @@ class CarpeApi:
         return self.focus_app("tabula")
 
 
+# 644 (forge_guard_644.py): the Forge's own address answers the Forge's own window only. pywebview serves the page from
+# 127.0.0.1; a request that names any other host (a page that has pointed its own name at 127.0.0.1) is refused before any
+# file is read.
+def _guard_local_server():
+    try:
+        import webview.http as _wh
+    except Exception:
+        return False
+    b = getattr(_wh, "bottle", None)
+    if b is None or getattr(b.run, "_forge_guard", False):
+        return bool(b)
+    orig = b.run
+
+    def run(app=None, *a, **kw):
+        # the port as pywebview gives it (by name), or in its place (bottle.run(app, server, host, port))
+        port, inner = kw.get("port") or (a[2] if len(a) > 2 else None), app
+
+        def guarded(environ, start_response):
+            host = (environ.get("HTTP_HOST") or "").strip().lower()
+            name = host if host.endswith("]") else host.rsplit(":", 1)[0]
+            # with the port known, the window's own address exactly; were a later pywebview to start its server some
+            # other way, the computer's own name alone (a page that rebinds a name always names its own), never a blank window
+            if (port and host in ("127.0.0.1:%s" % port, "localhost:%s" % port, "[::1]:%s" % port)) or                     (not port and name in ("127.0.0.1", "localhost", "[::1]")):
+                return inner(environ, start_response)
+            body = b"This address answers only the Forge's own window."
+            start_response("421 Misdirected Request", [("Content-Type", "text/plain; charset=utf-8"),
+                                                       ("Content-Length", str(len(body)))])
+            return [body]
+        return orig(guarded, *a, **kw)   # the app first, in its place, however the rest is given
+    run._forge_guard = True
+    b.run = run
+    return True
+
+
 def _make_window(webview, api, app_url, background):
     """The main window, in one place so its creation can be guarded.
 
@@ -1481,6 +1515,7 @@ def _make_window(webview, api, app_url, background):
     before any Python error can be raised, which is why the window died with
     nothing written down.
     """
+    _guard_local_server()
     return webview.create_window(
         WINDOW_TITLE,
         url=app_url,

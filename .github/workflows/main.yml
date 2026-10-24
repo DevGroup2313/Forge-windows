@@ -338,7 +338,7 @@ jobs:
           if ($otherNow -ne 'C:\Nowhere\something-else.exe') { Write-Error "The installer changed a shortcut that was not the Forge's."; exit 1 }
           $said = Get-Content "$env:RUNNER_TEMP\setup-log.txt" -Raw
           if ($said -notmatch 'still in place three seconds after') { Write-Error "The installer did not look at the program after putting it in place."; exit 1 }
-          Remove-Item $stale, $other -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (@($stale) + $other) -ErrorAction SilentlyContinue
           $kept = @(Get-ChildItem $bk -Directory -Filter 'setup-*' | Sort-Object Name | ForEach-Object Name)
           "Backups of the work kept by the installer: $($kept -join ', ')"
           if ($kept.Count -ne 3 -or $kept -contains 'setup-20000101-000000' -or $kept -contains 'setup-20000102-000000' -or $kept[-1] -like 'setup-2000*') { Write-Error "The installer did not keep exactly the three newest backups."; exit 1 }

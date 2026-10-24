@@ -18,6 +18,10 @@
 ; calm page, with Microsoft's download page, and the install carries on; and
 ; the Ready page is gone, so the Shortcuts page's button says Install.
 ;
+; 24 October 2026: a shortcut or a pin left by an older Forge, whose program is no longer there ("the file has moved"),
+; now opens the installed program; and if the program is removed a moment after it is installed (an antivirus), the
+; installer says so plainly.
+;
 ; The same design as Inkwell's Windows installer (Inkwell-Windows\build\
 ; inkwell.iss, Inkwell 7.36): every [Setup] key Inkwell sets is set here the
 ; same way, except the AppId (it must never change) and the installer's file
@@ -288,6 +292,108 @@ begin
   end;
 end;
 
+{ 24 October 2026: shortcuts left by an older Forge. The owner (24 October 2026): after installing, opening The Forge
+  said that "the file has moved". That is what Windows says of a shortcut whose program is no longer there: a Desktop
+  shortcut, or a pin on the taskbar or in Start, made for the old single-file The Forge.exe, which was unpacked from a zip
+  wherever it was saved and is no longer published. Every such shortcut in the places Windows keeps them (the Desktop, the
+  Start menu, the taskbar's and Start's pins) now opens the installed program. Only a shortcut to a The Forge program that
+  is gone is changed; nothing else is touched, and every change is written in the installer's log. }
+function IsForgeProgramName(const Target: String): Boolean;
+var
+  N: String;
+begin
+  N := Lowercase(ExtractFileName(Target));
+  Result := (CompareText(ExtractFileExt(N), '.exe') = 0) and
+    ((N = 'the forge.exe') or (Pos('the-forge', N) = 1) or (Pos('the_forge', N) = 1) or (Pos('theforge', N) = 1));
+end;
+
+procedure RepairShortcutsIn(Shell: Variant; const Dir, Target: String; Depth: Integer);
+var
+  FindRec: TFindRec;
+  Path, Old: String;
+  Lnk: Variant;
+begin
+  if (Dir = '') or not DirExists(Dir) then
+    exit;
+  if FindFirst(AddBackslash(Dir) + '*', FindRec) then
+  begin
+    try
+      repeat
+        Path := AddBackslash(Dir) + FindRec.Name;
+        if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+        begin
+          if (Depth > 0) and (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+            RepairShortcutsIn(Shell, Path, Target, Depth - 1);
+        end
+        else if CompareText(ExtractFileExt(FindRec.Name), '.lnk') = 0 then
+        begin
+          try
+            Lnk := Shell.CreateShortcut(Path);
+            Old := Lnk.TargetPath;
+            if (Old <> '') and IsForgeProgramName(Old) and (CompareText(Old, Target) <> 0) and not FileExists(Old) then
+            begin
+              Lnk.TargetPath := Target;
+              Lnk.WorkingDirectory := ExtractFileDir(Target);
+              Lnk.IconLocation := Target + ',0';
+              Lnk.Save;
+              Log('Shortcut repaired: ' + Path + ' opened ' + Old + ', which is no longer there; it now opens ' + Target);
+            end;
+          except
+            Log('A shortcut could not be read or repaired: ' + Path + ' (' + GetExceptionMessage + ')');
+          end;
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
+procedure RepairOldShortcuts;
+var
+  Shell: Variant;
+  Target: String;
+begin
+  Target := ExpandConstant('{app}\The Forge.exe');
+  try
+    Shell := CreateOleObject('WScript.Shell');
+  except
+    Log('Old shortcuts were not looked at: ' + GetExceptionMessage);
+    exit;
+  end;
+  RepairShortcutsIn(Shell, ExpandConstant('{userdesktop}'), Target, 0);
+  RepairShortcutsIn(Shell, ExpandConstant('{userstartmenu}'), Target, 2);
+  RepairShortcutsIn(Shell, ExpandConstant('{userappdata}\Microsoft\Internet Explorer\Quick Launch'), Target, 2);
+end;
+
+{ 24 October 2026: the program, a moment after it was put in place. Something on the PC that removes a new program at once (an
+  antivirus that takes a new, unsigned program for a threat) leaves every shortcut saying that the file has moved. The
+  installer now looks again three seconds later and, if the program is gone, says so plainly, with what to do. }
+procedure CheckProgramStayed;
+var
+  Exe: String;
+  I: Integer;
+begin
+  Exe := ExpandConstant('{app}\The Forge.exe');
+  I := 0;
+  while FileExists(Exe) and (I < 6) do
+  begin
+    Sleep(500);
+    I := I + 1;
+  end;
+  if FileExists(Exe) then
+    Log('The program is still in place three seconds after it was installed.')
+  else
+  begin
+    Log('The Forge.exe was installed and then removed by something on this PC (an antivirus, most likely).');
+    if not WizardSilent then
+      MsgBox('The Forge was installed, but a moment later something on this PC removed its program, The Forge.exe.' + #13#10#13#10 +
+        'This is almost always an antivirus taking a new program for a threat. In Windows Security, open Virus & threat protection, then Protection history. ' +
+        'If The Forge.exe is listed there, choose Actions, then Restore (or Allow on device). Another antivirus has a list like it, often called Quarantine.' + #13#10#13#10 +
+        'Then open The Forge from the Start menu, or run this installer again.', mbInformation, MB_OK);
+  end;
+end;
+
 { Before anything changes: copy the folder that holds your work to
   backups\setup-<date>. A copy only; nothing is moved. The web view's
   caches are left out, because they are rebuilt by themselves. The three
@@ -311,5 +417,10 @@ begin
         Log('Older backups could not be tidied: ' + GetExceptionMessage);
       end;
     end;
+  end;
+  if CurStep = ssPostInstall then
+  begin
+    RepairOldShortcuts;
+    CheckProgramStayed;
   end;
 end;

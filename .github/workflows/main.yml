@@ -308,6 +308,17 @@ jobs:
           $bk = Join-Path $env:LOCALAPPDATA 'TheForge\backups'
           New-Item -ItemType Directory -Force -Path (Join-Path $env:LOCALAPPDATA 'TheForge\storage') | Out-Null
           foreach ($d in 'setup-20000101-000000', 'setup-20000102-000000', 'setup-20000103-000000', 'setup-20000104-000000') { New-Item -ItemType Directory -Force -Path "$bk\$d\storage" | Out-Null }
+          # 24 October 2026: shortcuts an older Forge left ("the file has moved"): one on the Desktop and a pin on the taskbar, both to
+          # the old single-file The Forge.exe unpacked in Downloads and since deleted, and one to another program that is
+          # gone, which must stay as it is
+          $ws = New-Object -ComObject WScript.Shell
+          $gone = Join-Path $env:USERPROFILE 'Downloads\The-Forge-Windows\The Forge.exe'
+          $pins = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
+          New-Item -ItemType Directory -Force -Path $pins | Out-Null
+          $stale = @((Join-Path ([Environment]::GetFolderPath('Desktop')) 'The Forge (old).lnk'), (Join-Path $pins 'The Forge.lnk'))
+          foreach ($l in $stale) { $sc = $ws.CreateShortcut($l); $sc.TargetPath = $gone; $sc.Save() }
+          $other = Join-Path $pins 'Something else.lnk'
+          $sc = $ws.CreateShortcut($other); $sc.TargetPath = 'C:\Nowhere\something-else.exe'; $sc.Save()
           $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/LOG=$env:RUNNER_TEMP\setup-log.txt" -PassThru
           $null = $p.Handle   # without this, PowerShell may lose the exit code
           if (-not $p.WaitForExit(600000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Write-Error "The installer did not finish within 10 minutes."; exit 1 }
@@ -320,6 +331,14 @@ jobs:
           $key = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like 'com.yannieforest.theforge.windows*' }
           if (-not $key) { Write-Error "No entry in Settings, Apps."; exit 1 }
           "Installed in $dir, with a Start menu entry and an entry in Settings, Apps."
+          $now = @($stale | ForEach-Object { $ws.CreateShortcut($_).TargetPath })
+          $otherNow = $ws.CreateShortcut($other).TargetPath
+          "Old shortcuts now open: $($now -join '; '); the other one still opens $otherNow"
+          if (@($now | Where-Object { $_ -ne "$dir\The Forge.exe" }).Count -gt 0) { Get-Content "$env:RUNNER_TEMP\setup-log.txt" -Tail 30; Write-Error "The installer did not repair the shortcuts an older Forge left."; exit 1 }
+          if ($otherNow -ne 'C:\Nowhere\something-else.exe') { Write-Error "The installer changed a shortcut that was not the Forge's."; exit 1 }
+          $said = Get-Content "$env:RUNNER_TEMP\setup-log.txt" -Raw
+          if ($said -notmatch 'still in place three seconds after') { Write-Error "The installer did not look at the program after putting it in place."; exit 1 }
+          Remove-Item $stale, $other -ErrorAction SilentlyContinue
           $kept = @(Get-ChildItem $bk -Directory -Filter 'setup-*' | Sort-Object Name | ForEach-Object Name)
           "Backups of the work kept by the installer: $($kept -join ', ')"
           if ($kept.Count -ne 3 -or $kept -contains 'setup-20000101-000000' -or $kept -contains 'setup-20000102-000000' -or $kept[-1] -like 'setup-2000*') { Write-Error "The installer did not keep exactly the three newest backups."; exit 1 }
@@ -528,7 +547,7 @@ jobs:
             "Starter: $env:BOOTLOADER."
             "Start on GitHub's Windows computer (a first start, no graphics chip; a PC is usually quicker): $startNote."
             ""
-            "The-Forge-Windows.zip, the old single-file program, is no longer published: the program is now a folder that this installer puts in place."
+            "The-Forge-Windows.zip, the old single-file program, is no longer published: the program is now a folder that this installer puts in place. A shortcut or a pin made for the old program now opens the installed one; if Windows still says that the file has moved, unpin it, and pin The Forge again from the Start menu."
             ""
             "SHA-256 of $setupName (to check a download, or to report a false alarm to Microsoft):"
             "  $hs"

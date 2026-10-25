@@ -1500,7 +1500,7 @@ def _guard_local_server():
             # with the port known, the window's own address exactly; were a later pywebview to start its server some
             # other way, the computer's own name alone (a page that rebinds a name always names its own), never a blank window
             if (port and host in ("127.0.0.1:%s" % port, "localhost:%s" % port, "[::1]:%s" % port)) or                     (not port and name in ("127.0.0.1", "localhost", "[::1]")):
-                return inner(environ, start_response)
+                return inner(environ, _forge_no_store(start_response))  # 647 (forge_shell_647b.py)
             body = b"This address answers only the Forge's own window."
             start_response("421 Misdirected Request", [("Content-Type", "text/plain; charset=utf-8"),
                                                        ("Content-Length", str(len(body)))])
@@ -1652,6 +1652,81 @@ def _forge_care_attach(window):
         log_problem("care: could not listen to the web view", sys.exc_info())
 
 
+def _forge_no_store(start_response):
+    """647 (forge_shell_647b.py): every answer from the Forge's own address says it is not to be kept."""
+    def sr(status, headers, exc_info=None):
+        keep = [(k, v) for (k, v) in headers if k.lower() not in ("cache-control", "expires", "pragma", "etag", "last-modified")]
+        keep += [("Cache-Control", "no-store, max-age=0"), ("Pragma", "no-cache"), ("Expires", "0")]
+        if exc_info is not None:
+            return start_response(status, keep, exc_info)
+        return start_response(status, keep)
+    return sr
+
+
+def _page_build(path):
+    """The build the Forge's page names (window.CD_BUILD's pass and stamp), read from the file, or ''."""
+    import re as _re
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+        m = _re.search(rb'window\.CD_BUILD=\{date:"[^"]*",pass:"(\d+)",stamp:"([^"]*)"', data)
+        return (m.group(1) + b" " + m.group(2)).decode("ascii", "replace") if m else ""
+    except Exception:
+        return ""
+
+
+def _forget_old_pages(app_html):
+    """647 (forge_shell_647b.py): the first time a build starts, the web view's cache of pages is emptied, so the window shows
+    this build's page and not one kept from an earlier build at the same address. The work (local storage, the databases) is
+    never touched."""
+    build = _page_build(app_html)
+    store = storage_dir()
+    if not build or not store:
+        return
+    note = os.path.join(os.path.dirname(store), "page_build.txt")
+    try:
+        with open(note, encoding="utf-8") as fh:
+            before = fh.read().strip()
+    except Exception:
+        before = ""
+    if before == build:
+        return
+    emptied = False
+    try:
+        if sys.platform == "darwin":
+            import time as _t
+            import WebKit
+            from Foundation import NSDate, NSRunLoop, NSSet
+            kinds = NSSet.setWithArray_([WebKit.WKWebsiteDataTypeDiskCache, WebKit.WKWebsiteDataTypeMemoryCache])
+            done = {"ok": False}
+
+            def _done():
+                done["ok"] = True
+            WebKit.WKWebsiteDataStore.defaultDataStore().removeDataOfTypes_modifiedSince_completionHandler_(
+                kinds, NSDate.dateWithTimeIntervalSince1970_(0), _done)
+            end = _t.time() + 5
+            while not done["ok"] and _t.time() < end:
+                NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.05))
+            emptied = done["ok"]
+        elif sys.platform.startswith("win"):
+            import shutil as _sh
+            for rel in (("EBWebView", "Default", "Cache"), ("EBWebView", "Default", "Code Cache")):
+                p = os.path.join(store, *rel)
+                if os.path.isdir(p):
+                    _sh.rmtree(p, ignore_errors=True)
+            emptied = True
+    except Exception:
+        log_problem("page cache: could not be emptied", sys.exc_info())
+    log_note("page: build %s starts (the build before: %s); the web view's cache of pages %s"
+             % (build, before or "none noted", "emptied" if emptied else "NOT emptied"))
+    if emptied:
+        try:
+            with open(note, "w", encoding="utf-8") as fh:
+                fh.write(build)
+        except Exception:
+            pass
+
+
 def main():
     # 9s57: one copy at a time. First of all, and before the session mark is
     # read or written: a second click brings the open window forward and ends.
@@ -1681,6 +1756,10 @@ def main():
     # graphics on for this PC (_prepare_windows_graphics), and a real failure
     # to draw the window is still handled below, by the error it raises.
     _gfx_args, _gfx_soft = _prepare_windows_graphics(_prior)
+    try:
+        _forget_old_pages(app_html)  # 647 (forge_shell_647b.py)
+    except Exception:
+        log_problem("page cache: the check failed", sys.exc_info())
     log_problem("start: locating the window component")
     try:
         import webview  # pywebview

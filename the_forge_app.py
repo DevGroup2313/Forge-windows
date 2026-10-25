@@ -1727,6 +1727,36 @@ def _forget_old_pages(app_html):
             pass
 
 
+def _forge_web_links_only(app_html):
+    """648 (forge_shell_648.py): the system is asked to open only a web address (http or https), or the Forge's own page."""
+    import re as _re
+    try:
+        import webbrowser as _wb
+    except Exception:
+        return
+    if getattr(_wb.open, "_forge_web_only", False):
+        return
+    own = ""
+    try:
+        import pathlib as _pl
+        own = _pl.Path(app_html).as_uri() if app_html else ""
+    except Exception:
+        own = ""
+
+    def _only_web(fn):
+        def opener(url, *a, **k):
+            u = str(url or "").strip()
+            if not (_re.match(r"(?i)^https?://[^\s\x00-\x1f]+$", u) or (own and u == own)):
+                log_note("links: %r was not handed to the system (only web addresses, http and https, are opened)" % u[:160])
+                return False
+            return fn(u, *a, **k)
+        opener._forge_web_only = True
+        return opener
+    for name in ("open", "open_new", "open_new_tab"):
+        if hasattr(_wb, name):
+            setattr(_wb, name, _only_web(getattr(_wb, name)))
+
+
 def main():
     # 9s57: one copy at a time. First of all, and before the session mark is
     # read or written: a second click brings the open window forward and ends.
@@ -1758,6 +1788,7 @@ def main():
     _gfx_args, _gfx_soft = _prepare_windows_graphics(_prior)
     try:
         _forget_old_pages(app_html)  # 647 (forge_shell_647b.py)
+        _forge_web_links_only(app_html)  # 648 (forge_shell_648.py)
     except Exception:
         log_problem("page cache: the check failed", sys.exc_info())
     log_problem("start: locating the window component")

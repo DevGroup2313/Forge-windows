@@ -106,8 +106,8 @@ Type: files; Name: "{localappdata}\TheForge\storage\the_forge_session.flag"
 Source: "{#ProgramDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{userprograms}\The Forge"; Filename: "{app}\The Forge.exe"; WorkingDir: "{app}"; Comment: "The Forge {#AppVersion}"
-Name: "{userdesktop}\The Forge"; Filename: "{app}\The Forge.exe"; WorkingDir: "{app}"; Comment: "The Forge {#AppVersion}"; Tasks: desktopicon
+Name: "{userprograms}\The Forge"; Filename: "{app}\The Forge.exe"; WorkingDir: "{app}"; Comment: "The Forge {#AppVersion}"; AppUserModelID: "com.yannieforest.theforge"
+Name: "{userdesktop}\The Forge"; Filename: "{app}\The Forge.exe"; WorkingDir: "{app}"; Comment: "The Forge {#AppVersion}"; Tasks: desktopicon; AppUserModelID: "com.yannieforest.theforge"
 
 [Run]
 Filename: "{app}\The Forge.exe"; Description: "Open The Forge now"; Flags: nowait postinstall skipifsilent

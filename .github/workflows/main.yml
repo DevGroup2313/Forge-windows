@@ -175,16 +175,30 @@ jobs:
             return $null
           }
           function Shown($s) { if ($null -eq $s) { 'not recorded' } else { [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0} s', $s) } }
+          # 649: does the window answer while the page loads? Windows marks a window "Not responding" when it has not taken
+          # its messages for 5 seconds (IsHungAppWindow says the same); it is asked every quarter of a second.
+          Add-Type -Namespace ForgeProbe -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr h);'
+          $hung = 0; $hungRun = 0; $hungLongest = 0; $asked = 0
+          function Probe {
+            $p.Refresh(); $h = $p.MainWindowHandle
+            if ($h -eq [IntPtr]::Zero) { return }
+            $script:asked++
+            if ([ForgeProbe.U]::IsHungAppWindow($h)) { $script:hung++; $script:hungRun++; if ($script:hungRun -gt $script:hungLongest) { $script:hungLongest = $script:hungRun } } else { $script:hungRun = 0 }
+          }
           $before = @(Get-ChildItem -Force -Name)
           $clock = [Diagnostics.Stopwatch]::StartNew()
           $p = Start-Process -FilePath ".\The Forge.exe" -PassThru
           $null = $p.Handle   # without this, PowerShell may lose the exit code
           $text = ''
           while (($clock.Elapsed.TotalSeconds -lt 120) -and -not $p.HasExited) {
-            Start-Sleep -Milliseconds 500
+            foreach ($i in 1..2) { Start-Sleep -Milliseconds 250; Probe }
             $text = ReadLog
             if ($text -match 'start: page (NOT )?ready') { break }
           }
+          foreach ($i in 1..20) { if ($p.HasExited) { break }; Start-Sleep -Milliseconds 250; Probe }
+          $hungNote = [string]::Format([Globalization.CultureInfo]::InvariantCulture, 'the window was marked Not responding for {0:0.0} s in all (at most {1:0.0} s at a time), asked {2} times', $hung / 4, $hungLongest / 4, $asked)
+          "Responsiveness during the start: $hungNote."
+          if ($hung -gt 0) { "::warning::While the page loaded, $hungNote." }
           $waited = Shown $clock.Elapsed.TotalSeconds
           $readyIn = Secs $text 'start: page ready in ([0-9.]+) s'
           if ($null -ne $readyIn) { "The page said it was ready $(Shown $readyIn) after the program started ($waited after it was launched here)." } else { "No ready line from the program after $waited." }
@@ -267,7 +281,7 @@ jobs:
           $readyIn = Secs $text 'start: page ready in ([0-9.]+) s'
           $note = "window shown after $(Shown $shown), page loaded after $(Shown $loaded), page ready after $(Shown $readyIn)"
           Add-Content $env:GITHUB_STEP_SUMMARY "### Start on GitHub's Windows computer: $note"
-          Add-Content $env:GITHUB_STEP_SUMMARY "Seconds from the program's own start, on a first start (a new web view profile) on a computer with no graphics chip, so a PC is usually quicker. Second start: $second. Opened again at once after a close: $reopen."
+          Add-Content $env:GITHUB_STEP_SUMMARY "Seconds from the program's own start, on a first start (a new web view profile) on a computer with no graphics chip, so a PC is usually quicker. Second start: $second. Opened again at once after a close: $reopen. Responsiveness: $hungNote."
           "START_NOTE=$note" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           if ($text -match 'Traceback') { Write-Error "A fault was recorded."; exit 1 }
           if (-not $alive) { exit 1 }

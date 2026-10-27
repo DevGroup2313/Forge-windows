@@ -1757,7 +1757,23 @@ def _forge_web_links_only(app_html):
             setattr(_wb, name, _only_web(getattr(_wb, name)))
 
 
+APP_USER_MODEL_ID = "com.yannieforest.theforge"
+
+
+def _own_taskbar_identity():
+    """649 (forge_shell_649.py): the Forge's own identity on Windows (its AppUserModelID), set before any window, so its taskbar
+    button, its pins and its Start menu entry are its own, even when it runs from the kit's script as pythonw.exe."""
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception as exc:
+        log_note("taskbar identity: not set (%s)" % (exc,))
+
+
 def main():
+    _own_taskbar_identity()
     # 9s57: one copy at a time. First of all, and before the session mark is
     # read or written: a second click brings the open window forward and ends.
     if _another_copy_is_open():

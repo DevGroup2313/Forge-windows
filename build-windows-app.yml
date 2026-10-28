@@ -59,7 +59,7 @@ jobs:
         run: git config --global core.autocrlf false
 
       - name: Get the project
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Find the project folder and the build number
         run: |
@@ -95,7 +95,7 @@ jobs:
           "Build $pass ($stamp), version $numeric, installer $setupBase.exe"
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -307,7 +307,7 @@ jobs:
 
       - name: Keep the screenshot with this run
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: windows-screenshot
           path: ${{ runner.temp }}/shots
@@ -541,7 +541,7 @@ jobs:
 
       - name: Keep the installer, the zips and the Defender report with this run
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: the-forge-windows
           path: |

@@ -115,6 +115,17 @@ jobs:
           "STOCK_BOOTLOADER=$stock" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           exit 0
 
+      - name: Make the quick page (the apps the Forge carries in files beside it)
+        # 649: the program opens a page of about 14 MB, not 72 MB; the apps the Forge carries are scripts beside it
+        # (the_forge_parts), read the first time they are wanted, and the page keeps its address, so her work stays
+        # where it was. quick_split.py checks that putting them back gives the_forge.html exactly.
+        run: |
+          Set-Location $env:PROJ
+          if (Test-Path quick) { Remove-Item quick -Recurse -Force }
+          python quick_split.py split the_forge.html quick
+          if ($LASTEXITCODE -ne 0) { Write-Error "The quick page could not be made from the_forge.html."; exit 1 }
+          exit 0
+
       - name: Build The Forge (a program folder)
         run: |
           Set-Location $env:PROJ
@@ -140,8 +151,11 @@ jobs:
           exit 0
 
       - name: Check the app file inside is the one committed
+        # 649: the page inside and its parts, put back together, must be the_forge.html exactly
         run: |
-          python -c "import sys,hashlib; a=open(sys.argv[1],'rb').read(); b=open(sys.argv[2],'rb').read(); print('inside', hashlib.sha256(a).hexdigest(), 'committed', hashlib.sha256(b).hexdigest(), 'CRLF inside', a.count(b'\r\n')); sys.exit(0 if a==b and a.count(b'\r\n')==0 else 1)" "$env:PROGRAM_DIR\_internal\the_forge.html" "$env:PROJ\the_forge.html"
+          python -c "import sys; a=open(sys.argv[1],'rb').read(); print('CRLF inside', a.count(b'\r\n')); sys.exit(0 if a.count(b'\r\n')==0 else 1)" "$env:PROGRAM_DIR\_internal\the_forge.html"
+          if ($LASTEXITCODE -ne 0) { Write-Error "The page inside the program has Windows line endings."; exit 1 }
+          python "$env:PROJ\quick_split.py" join "$env:PROGRAM_DIR\_internal\the_forge.html" "$env:PROGRAM_DIR\_internal\the_forge_parts" "$env:PROJ\the_forge.html"
           if ($LASTEXITCODE -ne 0) { Write-Error "The app inside the program is not the file the_forge.html that was uploaded."; exit 1 }
           exit 0
 
@@ -340,6 +354,7 @@ jobs:
           if ($p.ExitCode -ne 0) { Write-Error "The installer failed."; exit 1 }
           if (-not (Test-Path "$dir\The Forge.exe")) { Write-Error "The installer did not put the program in $dir."; exit 1 }
           if (-not (Test-Path "$dir\_internal\the_forge.html")) { Write-Error "The installed program has no the_forge.html."; exit 1 }
+          if (@(Get-ChildItem "$dir\_internal\the_forge_parts" -Filter 'forge-bi-*.js' -ErrorAction SilentlyContinue).Count -ne 4) { Write-Error "The installed program does not have the four parts of its page."; exit 1 }
           $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'The Forge.lnk'
           if (-not (Test-Path $lnk)) { Write-Error "No Start menu entry was made."; exit 1 }
           $key = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like 'com.yannieforest.theforge.windows*' }
@@ -445,7 +460,7 @@ jobs:
           Zip $env:PROGRAM_DIR "$env:OUT\$env:FOLDER_ZIP"
           $copy = Join-Path $env:RUNNER_TEMP 'project-copy\Windows project'
           New-Item -ItemType Directory -Force -Path $copy | Out-Null
-          Get-ChildItem -Force $env:PROJ | Where-Object { $_.Name -notin @('.git', 'dist', 'build', '__pycache__') } | Copy-Item -Destination $copy -Recurse -Force
+          Get-ChildItem -Force $env:PROJ | Where-Object { $_.Name -notin @('.git', 'dist', 'build', '__pycache__', 'quick') } | Copy-Item -Destination $copy -Recurse -Force
           Zip $copy "$env:OUT\project-as-packaged.zip"
           exit 0
 

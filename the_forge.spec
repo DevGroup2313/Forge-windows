@@ -136,7 +136,9 @@ a = Analysis(
     ['the_forge_app.py'],
     pathex=[],
     binaries=extra_binaries,
-    datas=[('the_forge.html', '.'), ('the_forge.ico', '.'), ('the_forge.png', '.')] + extra_datas,
+    # 649: the quick page and its parts (quick_split.py, run by the build) when they are there; the full page otherwise
+    datas=([('quick/the_forge.html', '.'), ('quick/the_forge_parts', 'the_forge_parts')] if os.path.isdir(os.path.join(SPECPATH, 'quick')) else [('the_forge.html', '.')])
+          + [('the_forge.ico', '.'), ('the_forge.png', '.')] + extra_datas,
     hiddenimports=[
         'webview.platforms.winforms',
         'webview.platforms.edgechromium',

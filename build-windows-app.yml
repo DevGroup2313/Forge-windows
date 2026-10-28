@@ -115,6 +115,17 @@ jobs:
           "STOCK_BOOTLOADER=$stock" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           exit 0
 
+      - name: Make the quick page (the apps the Forge carries in files beside it)
+        # 649: the program opens a page of about 14 MB, not 72 MB; the apps the Forge carries are scripts beside it
+        # (the_forge_parts), read the first time they are wanted, and the page keeps its address, so her work stays
+        # where it was. quick_split.py checks that putting them back gives the_forge.html exactly.
+        run: |
+          Set-Location $env:PROJ
+          if (Test-Path quick) { Remove-Item quick -Recurse -Force }
+          python quick_split.py split the_forge.html quick
+          if ($LASTEXITCODE -ne 0) { Write-Error "The quick page could not be made from the_forge.html."; exit 1 }
+          exit 0
+
       - name: Build The Forge (a program folder)
         run: |
           Set-Location $env:PROJ
@@ -140,8 +151,11 @@ jobs:
           exit 0
 
       - name: Check the app file inside is the one committed
+        # 649: the page inside and its parts, put back together, must be the_forge.html exactly
         run: |
-          python -c "import sys,hashlib; a=open(sys.argv[1],'rb').read(); b=open(sys.argv[2],'rb').read(); print('inside', hashlib.sha256(a).hexdigest(), 'committed', hashlib.sha256(b).hexdigest(), 'CRLF inside', a.count(b'\r\n')); sys.exit(0 if a==b and a.count(b'\r\n')==0 else 1)" "$env:PROGRAM_DIR\_internal\the_forge.html" "$env:PROJ\the_forge.html"
+          python -c "import sys; a=open(sys.argv[1],'rb').read(); print('CRLF inside', a.count(b'\r\n')); sys.exit(0 if a.count(b'\r\n')==0 else 1)" "$env:PROGRAM_DIR\_internal\the_forge.html"
+          if ($LASTEXITCODE -ne 0) { Write-Error "The page inside the program has Windows line endings."; exit 1 }
+          python "$env:PROJ\quick_split.py" join "$env:PROGRAM_DIR\_internal\the_forge.html" "$env:PROGRAM_DIR\_internal\the_forge_parts" "$env:PROJ\the_forge.html"
           if ($LASTEXITCODE -ne 0) { Write-Error "The app inside the program is not the file the_forge.html that was uploaded."; exit 1 }
           exit 0
 
@@ -175,16 +189,30 @@ jobs:
             return $null
           }
           function Shown($s) { if ($null -eq $s) { 'not recorded' } else { [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0} s', $s) } }
+          # 649: does the window answer while the page loads? Windows marks a window "Not responding" when it has not taken
+          # its messages for 5 seconds (IsHungAppWindow says the same); it is asked every quarter of a second.
+          Add-Type -Namespace ForgeProbe -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr h);'
+          $hung = 0; $hungRun = 0; $hungLongest = 0; $asked = 0
+          function Probe {
+            $p.Refresh(); $h = $p.MainWindowHandle
+            if ($h -eq [IntPtr]::Zero) { return }
+            $script:asked++
+            if ([ForgeProbe.U]::IsHungAppWindow($h)) { $script:hung++; $script:hungRun++; if ($script:hungRun -gt $script:hungLongest) { $script:hungLongest = $script:hungRun } } else { $script:hungRun = 0 }
+          }
           $before = @(Get-ChildItem -Force -Name)
           $clock = [Diagnostics.Stopwatch]::StartNew()
           $p = Start-Process -FilePath ".\The Forge.exe" -PassThru
           $null = $p.Handle   # without this, PowerShell may lose the exit code
           $text = ''
           while (($clock.Elapsed.TotalSeconds -lt 120) -and -not $p.HasExited) {
-            Start-Sleep -Milliseconds 500
+            foreach ($i in 1..2) { Start-Sleep -Milliseconds 250; Probe }
             $text = ReadLog
             if ($text -match 'start: page (NOT )?ready') { break }
           }
+          foreach ($i in 1..20) { if ($p.HasExited) { break }; Start-Sleep -Milliseconds 250; Probe }
+          $hungNote = [string]::Format([Globalization.CultureInfo]::InvariantCulture, 'the window was marked Not responding for {0:0.0} s in all (at most {1:0.0} s at a time), asked {2} times', $hung / 4, $hungLongest / 4, $asked)
+          "Responsiveness during the start: $hungNote."
+          if ($hung -gt 0) { "::warning::While the page loaded, $hungNote." }
           $waited = Shown $clock.Elapsed.TotalSeconds
           $readyIn = Secs $text 'start: page ready in ([0-9.]+) s'
           if ($null -ne $readyIn) { "The page said it was ready $(Shown $readyIn) after the program started ($waited after it was launched here)." } else { "No ready line from the program after $waited." }
@@ -267,7 +295,7 @@ jobs:
           $readyIn = Secs $text 'start: page ready in ([0-9.]+) s'
           $note = "window shown after $(Shown $shown), page loaded after $(Shown $loaded), page ready after $(Shown $readyIn)"
           Add-Content $env:GITHUB_STEP_SUMMARY "### Start on GitHub's Windows computer: $note"
-          Add-Content $env:GITHUB_STEP_SUMMARY "Seconds from the program's own start, on a first start (a new web view profile) on a computer with no graphics chip, so a PC is usually quicker. Second start: $second. Opened again at once after a close: $reopen."
+          Add-Content $env:GITHUB_STEP_SUMMARY "Seconds from the program's own start, on a first start (a new web view profile) on a computer with no graphics chip, so a PC is usually quicker. Second start: $second. Opened again at once after a close: $reopen. Responsiveness: $hungNote."
           "START_NOTE=$note" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           if ($text -match 'Traceback') { Write-Error "A fault was recorded."; exit 1 }
           if (-not $alive) { exit 1 }
@@ -308,6 +336,17 @@ jobs:
           $bk = Join-Path $env:LOCALAPPDATA 'TheForge\backups'
           New-Item -ItemType Directory -Force -Path (Join-Path $env:LOCALAPPDATA 'TheForge\storage') | Out-Null
           foreach ($d in 'setup-20000101-000000', 'setup-20000102-000000', 'setup-20000103-000000', 'setup-20000104-000000') { New-Item -ItemType Directory -Force -Path "$bk\$d\storage" | Out-Null }
+          # 24 October 2026: shortcuts an older Forge left ("the file has moved"): one on the Desktop and a pin on the taskbar, both to
+          # the old single-file The Forge.exe unpacked in Downloads and since deleted, and one to another program that is
+          # gone, which must stay as it is
+          $ws = New-Object -ComObject WScript.Shell
+          $gone = Join-Path $env:USERPROFILE 'Downloads\The-Forge-Windows\The Forge.exe'
+          $pins = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
+          New-Item -ItemType Directory -Force -Path $pins | Out-Null
+          $stale = @((Join-Path ([Environment]::GetFolderPath('Desktop')) 'The Forge (old).lnk'), (Join-Path $pins 'The Forge.lnk'))
+          foreach ($l in $stale) { $sc = $ws.CreateShortcut($l); $sc.TargetPath = $gone; $sc.Save() }
+          $other = Join-Path $pins 'Something else.lnk'
+          $sc = $ws.CreateShortcut($other); $sc.TargetPath = 'C:\Nowhere\something-else.exe'; $sc.Save()
           $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/LOG=$env:RUNNER_TEMP\setup-log.txt" -PassThru
           $null = $p.Handle   # without this, PowerShell may lose the exit code
           if (-not $p.WaitForExit(600000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Write-Error "The installer did not finish within 10 minutes."; exit 1 }
@@ -315,11 +354,20 @@ jobs:
           if ($p.ExitCode -ne 0) { Write-Error "The installer failed."; exit 1 }
           if (-not (Test-Path "$dir\The Forge.exe")) { Write-Error "The installer did not put the program in $dir."; exit 1 }
           if (-not (Test-Path "$dir\_internal\the_forge.html")) { Write-Error "The installed program has no the_forge.html."; exit 1 }
+          if (@(Get-ChildItem "$dir\_internal\the_forge_parts" -Filter 'forge-bi-*.js' -ErrorAction SilentlyContinue).Count -ne 4) { Write-Error "The installed program does not have the four parts of its page."; exit 1 }
           $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'The Forge.lnk'
           if (-not (Test-Path $lnk)) { Write-Error "No Start menu entry was made."; exit 1 }
           $key = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like 'com.yannieforest.theforge.windows*' }
           if (-not $key) { Write-Error "No entry in Settings, Apps."; exit 1 }
           "Installed in $dir, with a Start menu entry and an entry in Settings, Apps."
+          $now = @($stale | ForEach-Object { $ws.CreateShortcut($_).TargetPath })
+          $otherNow = $ws.CreateShortcut($other).TargetPath
+          "Old shortcuts now open: $($now -join '; '); the other one still opens $otherNow"
+          if (@($now | Where-Object { $_ -ne "$dir\The Forge.exe" }).Count -gt 0) { Get-Content "$env:RUNNER_TEMP\setup-log.txt" -Tail 30; Write-Error "The installer did not repair the shortcuts an older Forge left."; exit 1 }
+          if ($otherNow -ne 'C:\Nowhere\something-else.exe') { Write-Error "The installer changed a shortcut that was not the Forge's."; exit 1 }
+          $said = Get-Content "$env:RUNNER_TEMP\setup-log.txt" -Raw
+          if ($said -notmatch 'still in place three seconds after') { Write-Error "The installer did not look at the program after putting it in place."; exit 1 }
+          Remove-Item -LiteralPath (@($stale) + $other) -ErrorAction SilentlyContinue
           $kept = @(Get-ChildItem $bk -Directory -Filter 'setup-*' | Sort-Object Name | ForEach-Object Name)
           "Backups of the work kept by the installer: $($kept -join ', ')"
           if ($kept.Count -ne 3 -or $kept -contains 'setup-20000101-000000' -or $kept -contains 'setup-20000102-000000' -or $kept[-1] -like 'setup-2000*') { Write-Error "The installer did not keep exactly the three newest backups."; exit 1 }
@@ -412,7 +460,7 @@ jobs:
           Zip $env:PROGRAM_DIR "$env:OUT\$env:FOLDER_ZIP"
           $copy = Join-Path $env:RUNNER_TEMP 'project-copy\Windows project'
           New-Item -ItemType Directory -Force -Path $copy | Out-Null
-          Get-ChildItem -Force $env:PROJ | Where-Object { $_.Name -notin @('.git', 'dist', 'build', '__pycache__') } | Copy-Item -Destination $copy -Recurse -Force
+          Get-ChildItem -Force $env:PROJ | Where-Object { $_.Name -notin @('.git', 'dist', 'build', '__pycache__', 'quick') } | Copy-Item -Destination $copy -Recurse -Force
           Zip $copy "$env:OUT\project-as-packaged.zip"
           exit 0
 
@@ -528,7 +576,7 @@ jobs:
             "Starter: $env:BOOTLOADER."
             "Start on GitHub's Windows computer (a first start, no graphics chip; a PC is usually quicker): $startNote."
             ""
-            "The-Forge-Windows.zip, the old single-file program, is no longer published: the program is now a folder that this installer puts in place."
+            "The-Forge-Windows.zip, the old single-file program, is no longer published: the program is now a folder that this installer puts in place. A shortcut or a pin made for the old program now opens the installed one; if Windows still says that the file has moved, unpin it, and pin The Forge again from the Start menu."
             ""
             "SHA-256 of $setupName (to check a download, or to report a false alarm to Microsoft):"
             "  $hs"
